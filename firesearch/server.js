@@ -1,97 +1,192 @@
-const express = require('express');
-const axios = require('axios');
+const http = require('http');
+const https = require('https');
+const url = require('url');
 const path = require('path');
 
-const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-app.use(express.static('public'));
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', service: 'firesearch' });
-});
-
-// Main search API endpoint
-app.post('/api/search', async (req, res) => {
-  try {
-    const { query } = req.body;
+// Simple HTTP request helper using built-in modules
+function makeRequest(requestUrl, options = {}) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(requestUrl);
+    const httpModule = parsedUrl.protocol === 'https:' ? https : http;
     
-    if (!query) {
-      return res.status(400).json({ error: 'Query é obrigatório' });
+    const requestOptions = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || 'GET',
+      timeout: options.timeout || 5000,
+      headers: options.headers || {}
+    };
+
+    const req = httpModule.request(requestOptions, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode,
+          data: data,
+          headers: res.headers
+        });
+      });
+    });
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    if (options.body) {
+      req.write(options.body);
     }
+    req.end();
+  });
+}
 
-    const firecrawlUrl = process.env.FIRECRAWL_API_URL || 'http://firecrawl:8001';
-    const claudeUrl = process.env.CLAUDE_API_URL || 'http://claude-code-api:8000';
-    
-    let result = `Processando consulta: "${query}"\n\n`;
-
-    // Test Firecrawl service
-    try {
-      result += '1. Testando conectividade com Firecrawl...\n';
-      const firecrawlResponse = await axios.get(`${firecrawlUrl}/health`, { timeout: 5000 });
-      result += `   ✅ Firecrawl está respondendo: ${firecrawlResponse.status}\n`;
-    } catch (err) {
+// Parse POST request body
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
       try {
-        // Try alternative endpoints
-        const firecrawlResponse = await axios.get(`${firecrawlUrl}/api/health`, { timeout: 5000 });
-        result += `   ✅ Firecrawl está respondendo: ${firecrawlResponse.status}\n`;
-      } catch (err2) {
-        try {
-          const firecrawlResponse = await axios.get(`${firecrawlUrl}/`, { timeout: 5000 });
-          result += `   ✅ Firecrawl está respondendo: ${firecrawlResponse.status}\n`;
-        } catch (err3) {
-          result += `   ❌ Erro ao conectar com Firecrawl: ${err3.message}\n`;
+        const contentType = req.headers['content-type'] || '';
+        if (contentType.includes('application/json')) {
+          resolve(JSON.parse(body));
+        } else {
+          resolve(body);
         }
+      } catch (error) {
+        reject(error);
       }
-    }
+    });
+    req.on('error', reject);
+  });
+}
 
-    // Test Claude Code API service
-    try {
-      result += '2. Testando conectividade com Claude Code API...\n';
-      const claudeResponse = await axios.get(`${claudeUrl}/health`, { timeout: 5000 });
-      result += `   ✅ Claude Code API está respondendo: ${claudeResponse.status}\n`;
-    } catch (err) {
-      try {
-        // Try alternative endpoints
-        const claudeResponse = await axios.get(`${claudeUrl}/api/health`, { timeout: 5000 });
-        result += `   ✅ Claude Code API está respondendo: ${claudeResponse.status}\n`;
-      } catch (err2) {
-        try {
-          const claudeResponse = await axios.get(`${claudeUrl}/`, { timeout: 5000 });
-          result += `   ✅ Claude Code API está respondendo: ${claudeResponse.status}\n`;
-        } catch (err3) {
-          result += `   ❌ Erro ao conectar com Claude Code API: ${err3.message}\n`;
-        }
-      }
-    }
+// Send JSON response
+function sendJSON(res, data, statusCode = 200) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  });
+  res.end(JSON.stringify(data));
+}
 
-    // Simulate search functionality
-    result += '\n3. Executando busca simulada...\n';
-    result += `   📝 Query processada: "${query}"\n`;
-    result += `   🔍 Simulando scraping de resultados...\n`;
-    result += `   🤖 Simulando análise via LLM...\n`;
-    result += `   ✅ Busca local completada!\n\n`;
-    
-    result += '📊 Resultados simulados:\n';
-    result += `- Encontrados dados relacionados a: "${query}"\n`;
-    result += `- Processamento via Firecrawl: OK\n`;
-    result += `- Análise via Claude: OK\n`;
-    result += `- Todas as operações foram executadas localmente dentro da rede Docker\n`;
+// Send HTML response
+function sendHTML(res, html, statusCode = 200) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'text/html; charset=utf-8'
+  });
+  res.end(html);
+}
 
-    res.json({ result });
+// Create HTTP server
+const server = http.createServer(async (req, res) => {
+  const parsedUrl = url.parse(req.url, true);
+  const pathname = parsedUrl.pathname;
 
-  } catch (error) {
-    console.error('Erro na API de busca:', error);
-    res.status(500).json({ error: `Erro interno do servidor: ${error.message}` });
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type'
+    });
+    res.end();
+    return;
   }
-});
 
-// Serve HTML frontend
-app.get('/', (req, res) => {
-  res.send(`
-<!DOCTYPE html>
+  try {
+    // Health check endpoint
+    if (pathname === '/health') {
+      sendJSON(res, { status: 'healthy', service: 'firesearch' });
+      return;
+    }
+
+    // Search API endpoint
+    if (pathname === '/api/search' && req.method === 'POST') {
+      try {
+        const body = await parseBody(req);
+        const { query } = body;
+        
+        if (!query) {
+          sendJSON(res, { error: 'Query é obrigatório' }, 400);
+          return;
+        }
+
+        const firecrawlUrl = process.env.FIRECRAWL_API_URL || 'http://firecrawl:8001';
+        const claudeUrl = process.env.CLAUDE_API_URL || 'http://claude-code-api:8000';
+        
+        let result = \`Processando consulta: "\${query}"\n\n\`;
+
+        // Test Firecrawl service
+        try {
+          result += '1. Testando conectividade com Firecrawl...\n';
+          const firecrawlResponse = await makeRequest(\`\${firecrawlUrl}/health\`);
+          result += \`   ✅ Firecrawl está respondendo: \${firecrawlResponse.status}\n\`;
+        } catch (err) {
+          try {
+            const firecrawlResponse = await makeRequest(\`\${firecrawlUrl}/api/health\`);
+            result += \`   ✅ Firecrawl está respondendo: \${firecrawlResponse.status}\n\`;
+          } catch (err2) {
+            try {
+              const firecrawlResponse = await makeRequest(\`\${firecrawlUrl}/\`);
+              result += \`   ✅ Firecrawl está respondendo: \${firecrawlResponse.status}\n\`;
+            } catch (err3) {
+              result += \`   ❌ Erro ao conectar com Firecrawl: \${err3.message}\n\`;
+            }
+          }
+        }
+
+        // Test Claude Code API service
+        try {
+          result += '2. Testando conectividade com Claude Code API...\n';
+          const claudeResponse = await makeRequest(\`\${claudeUrl}/health\`);
+          result += \`   ✅ Claude Code API está respondendo: \${claudeResponse.status}\n\`;
+        } catch (err) {
+          try {
+            const claudeResponse = await makeRequest(\`\${claudeUrl}/api/health\`);
+            result += \`   ✅ Claude Code API está respondendo: \${claudeResponse.status}\n\`;
+          } catch (err2) {
+            try {
+              const claudeResponse = await makeRequest(\`\${claudeUrl}/\`);
+              result += \`   ✅ Claude Code API está respondendo: \${claudeResponse.status}\n\`;
+            } catch (err3) {
+              result += \`   ❌ Erro ao conectar com Claude Code API: \${err3.message}\n\`;
+            }
+          }
+        }
+
+        // Simulate search functionality
+        result += '\n3. Executando busca simulada...\n';
+        result += \`   📝 Query processada: "\${query}"\n\`;
+        result += \`   🔍 Simulando scraping de resultados...\n\`;
+        result += \`   🤖 Simulando análise via LLM...\n\`;
+        result += \`   ✅ Busca local completada!\n\n\`;
+        
+        result += '📊 Resultados simulados:\n';
+        result += \`- Encontrados dados relacionados a: "\${query}"\n\`;
+        result += \`- Processamento via Firecrawl: OK\n\`;
+        result += \`- Análise via Claude: OK\n\`;
+        result += \`- Todas as operações foram executadas localmente dentro da rede Docker\n\`;
+
+        sendJSON(res, { result });
+
+      } catch (error) {
+        console.error('Erro na API de busca:', error);
+        sendJSON(res, { error: \`Erro interno do servidor: \${error.message}\` }, 500);
+      }
+      return;
+    }
+
+    // Serve HTML frontend for root path
+    if (pathname === '/') {
+      const html = \`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
@@ -165,6 +260,14 @@ app.get('/', (req, res) => {
             border-radius: 4px;
             margin-bottom: 20px;
         }
+        .info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
     </style>
 </head>
 <body>
@@ -172,6 +275,14 @@ app.get('/', (req, res) => {
         <div class="header">
             <h1>🔥 Firesearch Local Suite</h1>
             <p>Busca local integrada com Firecrawl e Claude Code API</p>
+        </div>
+
+        <div class="info">
+            <strong>✅ Stack Local Ativo:</strong><br>
+            - Firesearch rodando internamente<br>
+            - Conectividade com Firecrawl: <span id="firecrawlStatus">verificando...</span><br>
+            - Conectividade com Claude Code API: <span id="claudeStatus">verificando...</span><br>
+            - Nenhuma dependência externa ou cloud
         </div>
 
         <form id="searchForm" class="search-form">
@@ -195,6 +306,41 @@ app.get('/', (req, res) => {
         const errorDiv = document.getElementById('error');
         const resultsDiv = document.getElementById('results');
         const resultsContent = document.getElementById('resultsContent');
+        const firecrawlStatus = document.getElementById('firecrawlStatus');
+        const claudeStatus = document.getElementById('claudeStatus');
+
+        // Test connectivity on page load
+        async function testConnectivity() {
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: 'teste_conectividade' }),
+                });
+                const data = await response.json();
+                
+                if (data.result.includes('Firecrawl está respondendo')) {
+                    firecrawlStatus.textContent = 'OK';
+                    firecrawlStatus.style.color = 'green';
+                } else {
+                    firecrawlStatus.textContent = 'Erro';
+                    firecrawlStatus.style.color = 'red';
+                }
+                
+                if (data.result.includes('Claude Code API está respondendo')) {
+                    claudeStatus.textContent = 'OK';
+                    claudeStatus.style.color = 'green';
+                } else {
+                    claudeStatus.textContent = 'Erro';
+                    claudeStatus.style.color = 'red';
+                }
+            } catch (error) {
+                firecrawlStatus.textContent = 'Erro';
+                firecrawlStatus.style.color = 'red';
+                claudeStatus.textContent = 'Erro';
+                claudeStatus.style.color = 'red';
+            }
+        }
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -239,14 +385,28 @@ app.get('/', (req, res) => {
                 searchButton.textContent = 'Pesquisar';
             }
         });
+
+        // Test connectivity when page loads
+        testConnectivity();
     </script>
 </body>
-</html>
-  `);
+</html>\`;
+      sendHTML(res, html);
+      return;
+    }
+
+    // 404 for other paths
+    sendJSON(res, { error: 'Not found' }, 404);
+
+  } catch (error) {
+    console.error('Server error:', error);
+    sendJSON(res, { error: 'Internal server error' }, 500);
+  }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🔥 Firesearch Local Suite rodando na porta ${PORT}`);
-  console.log(`Firecrawl URL: ${process.env.FIRECRAWL_API_URL || 'http://firecrawl:8001'}`);
-  console.log(`Claude URL: ${process.env.CLAUDE_API_URL || 'http://claude-code-api:8000'}`);
+// Start server
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(\`🔥 Firesearch Local Suite rodando na porta \${PORT}\`);
+  console.log(\`Firecrawl URL: \${process.env.FIRECRAWL_API_URL || 'http://firecrawl:8001'}\`);
+  console.log(\`Claude URL: \${process.env.CLAUDE_API_URL || 'http://claude-code-api:8000'}\`);
 });

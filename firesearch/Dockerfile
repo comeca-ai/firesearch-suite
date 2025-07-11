@@ -9,9 +9,6 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 COPY package.json ./
 COPY server.js ./
 
-# Instala dependências do Node.js
-RUN npm install --production
-
 # Copia o arquivo de exemplo de environment
 COPY .env.local.example /app/.env.local
 
