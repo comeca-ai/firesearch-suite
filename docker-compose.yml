@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  firecrawl:
+    image: mendableai/firecrawl:latest
+    container_name: firecrawl
+    environment:
+      - NODE_ENV=production
+      - FIRECRAWL_API_KEY=fc-local-key
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  claude-code-api:
+    image: codingworkflow/claude-code-api:latest
+    container_name: claude-code-api
+    environment:
+      - CLAUDE_API_KEY=sk-ant-local-key
+      - CLAUDE_BINARY_PATH=/usr/local/bin/claude
+    depends_on:
+      firecrawl:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  firesearch:
+    build:
+      context: ./firesearch
+    container_name: firesearch
+    env_file: ./firesearch/.env.local
+    ports:
+      - "3000:3000"
+    depends_on:
+      firecrawl:
+        condition: service_healthy
+      claude-code-api:
+        condition: service_healthy
+    networks:
+      - internal
+    command: ["/app/init_all.sh"]
+
+networks:
+  internal:
+    driver: bridge
