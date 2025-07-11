@@ -16,4 +16,4 @@ done
 echo "Claude Code API está pronto!"
 
 echo "Todos os serviços estão prontos. Iniciando Firesearch..."
-exec npm start
+exec node server.js
